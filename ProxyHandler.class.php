@@ -9,7 +9,88 @@
 
 class ProxyHandler
 {
-    /**
+	/**
+	 * Статусы ответов.
+	 *
+	 * @link http://httpstatus.es/
+	 * @link http://upload.wikimedia.org/wikipedia/commons/6/65/Http-headers-status.gif?uselang=ru
+	 *
+	 * @var array
+	 */
+	private $_status_codes = array (
+		100 => 'Continue',
+		101 => 'Switching Protocols',
+		102 => 'Processing', // (WebDAV) (RFC 2518)
+		103 => 'Checkpoint',
+		122 => 'Request-URI too long',
+		200 => 'OK',
+		201 => 'Created',
+		202 => 'Accepted',
+		203 => 'Non-Authoritative Information', // (since HTTP/1.1)
+		204 => 'No Content',
+		205 => 'Reset Content',
+		206 => 'Partial Content',
+		207 => 'Multi-Status', // (WebDAV) (RFC 4918)
+		208 => 'Already Reported', // (WebDAV) (RFC 5842)
+		226 => 'IM Used', // (RFC 3229)
+		300 => 'Multiple Choices',
+		301 => 'Moved Permanently',
+		302 => 'Found',
+		303 => 'See Other',
+		304 => 'Not Modified',
+		305 => 'Use Proxy', // (since HTTP/1.1)
+		306 => 'Switch Proxy',
+		307 => 'Temporary Redirect', // (since HTTP/1.1)
+		308 => 'Resume Incomplete',
+		400 => 'Bad Request',
+		401 => 'Unauthorized',
+		402 => 'Payment Required',
+		403 => 'Forbidden',
+		404 => 'Not Found',
+		405 => 'Method Not Allowed',
+		406 => 'Not Acceptable',
+		407 => 'Proxy Authentication Required',
+		408 => 'Request Timeout',
+		409 => 'Conflict',
+		410 => 'Gone',
+		411 => 'Length Required',
+		412 => 'Precondition Failed',
+		413 => 'Request Entity Too Large',
+		414 => 'Request-URI Too Long',
+		415 => 'Unsupported Media Type',
+		416 => 'Requested Range Not Satisfiable',
+		417 => 'Expectation Failed',
+		418 => 'I\'m a teapot', // (RFC 2324)
+		420 => 'Enhance Your Calm',
+		422 => 'Unprocessable Entity', // (WebDAV) (RFC 4918)
+		423 => 'Locked', // (WebDAV) (RFC 4918)
+		424 => 'Failed Dependency', // (WebDAV) (RFC 4918)
+		426 => 'Upgrade Required', // (RFC 2817)
+		428 => 'Precondition Required',
+		429 => 'Too Many Requests',
+		431 => 'Request Header Fields Too Large',
+		444 => 'No Response',
+		449 => 'Retry With',
+		450 => 'Blocked by Windows Parental Controls',
+		451 => 'Wrong Exchange server',
+		499 => 'Client Closed Request',
+		500 => 'Internal Server Error',
+		501 => 'Not Implemented',
+		502 => 'Bad Gateway',
+		503 => 'Service Unavailable',
+		504 => 'Gateway Timeout',
+		505 => 'HTTP Version Not Supported',
+		506 => 'Variant Also Negotiates', // (RFC 2295)
+		507 => 'Insufficient Storage', // (WebDAV) (RFC 4918)
+		508 => 'Loop Detected', // (WebDAV) (RFC 5842)
+		509 => 'Bandwidth Limit Exceeded', // (Apache bw/limited extension)
+		510 => 'Not Extended', // (RFC 2774)
+		511 => 'Network Authentication Required',
+		598 => 'Network read timeout error',
+		599 => 'Network connect timeout error',
+	);
+
+	/**
      * @type string
      */
     const RN = "\r\n";
@@ -34,6 +115,60 @@ class ProxyHandler
      * @type boolean
      */
     private $_pragma = false;
+
+	/**
+	 * Body when chunked response
+	 * @var string
+	 */
+	private $_body = '';
+
+	/**
+	 * @var string
+	 */
+	private $_encoding = '';
+
+	/**
+	 * @var bool
+	 */
+	private $_passRealIP = true;
+
+	/**
+	 * Uri
+	 * @var string
+	 */
+	private $_translatedUri = '';
+
+	/**
+	 * http status of response
+	 * @var int
+	 */
+	private $_httpStatus = 0;
+
+	/**
+	 * User specified callback to modify client headers
+	 * Called for each header (two arguments: headerName, value)
+	 * Should return array of two elements 0=>headerName, 1=>value
+	 * Or false if header should be removed from request to upstream
+	 *
+	 * @var null|callback
+	 */
+	private $_processClientHeaderCallback = null;
+
+	/**
+	 * User specified callback to filter response headers
+	 * Called for each header
+	 * Should return modified header or empty string to skip header
+	 * @var null|callback
+	 */
+	private $_filterResponseHeaderCallback = null;
+
+	/**
+	 * User specified callback to filter response body
+	 * Called for body
+	 * Should return modified body
+	 * @var null|callback
+	 */
+	private $_filterResponseBodyCallback = null;
 
     /**
      * Create a new ProxyHandler
@@ -84,15 +219,32 @@ class ProxyHandler
             $translatedUri .= '/';
         }
 
-        $this->_curlHandle = curl_init($translatedUri);
+		if ( isset($options['processClientHeaderCallback']) ) {
+			$this->_processClientHeaderCallback = $options['processClientHeaderCallback'];
+		}
+		if ( isset($options['filterResponseHeaderCallback']) ) {
+			$this->_filterResponseHeaderCallback = $options['filterResponseHeaderCallback'];
+		}
+		if ( isset($options['filterResponseBodyCallback']) ) {
+			$this->_filterResponseBodyCallback = $options['filterResponseBodyCallback'];
+		}
+
+		if ( isset($options['passRealIP']) ) {
+			$this->_passRealIP = (bool) $options['passRealIP'];
+		}
+
+		$this->_translatedUri = $translatedUri;
+
+        $this->_curlHandle = curl_init($this->_translatedUri);
 
         // Set various cURL options
         $this->setCurlOption(CURLOPT_FOLLOWLOCATION, true);
         $this->setCurlOption(CURLOPT_RETURNTRANSFER, true);
         // For images, etc.
         $this->setCurlOption(CURLOPT_BINARYTRANSFER, true);
-        $this->setCurlOption(CURLOPT_WRITEFUNCTION, array($this, 'readResponse'));
-        $this->setCurlOption(CURLOPT_HEADERFUNCTION, array($this, 'readHeaders'));
+		$this->setCurlOption(CURLOPT_WRITEFUNCTION, array($this, 'readResponse'));
+		$this->setCurlOption(CURLOPT_HEADERFUNCTION, array($this, 'readHeaders'));
+		//$this->setCurlOption(CURLOPT_VERBOSE, true);
 
         $requestMethod = '';
         if (isset($options['requestMethod'])) {
@@ -110,7 +262,6 @@ class ProxyHandler
 
             switch($requestMethod) {
                 case 'POST':
-                    $data = '';
                     if (isset($options['data'])) {
                         $data = $options['data'];
                     }
@@ -186,38 +337,73 @@ class ProxyHandler
         $xForwardedFor = array();
 
         foreach ($headers as $headerName => $value) {
-            switch($headerName) {
+			$l = $this->processClientHeader($headerName, $value);
+			if ( $l !== false ) {
+				$this->setClientHeader($l[0], $l[1]);
+				continue;
+			}
+			switch($headerName) {
                 case 'Host':
                 case 'X-Real-IP':
                     break;
-                    
+
                 case 'X-Forwarded-For':
                     $xForwardedFor[] = $value;
                     break;
-                    
+
                 default:
                     $this->setClientHeader($headerName, $value);
                     break;
             }
         }
 
-        $xForwardedFor[] = $_SERVER['REMOTE_ADDR'];
-        $this->setClientHeader('X-Forwarded-For', implode(',', $xForwardedFor));
-        $this->setClientHeader('X-Real-IP', $xForwardedFor[0]);
+        if ( $this->_passRealIP === true ) {
+			$xForwardedFor[] = $_SERVER['REMOTE_ADDR'];
+			$this->setClientHeader('X-Forwarded-For', implode(',', $xForwardedFor));
+			$this->setClientHeader('X-Real-IP', $xForwardedFor[0]);
+		}
     }
+
+	/**
+	 * Process client header (call user callback)
+	 * Header can be modified by user func or deny to proxy pass
+	 *
+	 * @param $headerName
+	 * @param $value
+	 * @return array|bool - array if header should be set, false otherwise
+	 */
+	protected function processClientHeader($headerName, $value)
+	{
+		if ( $this->_processClientHeaderCallback !== null ) {
+			$l = call_user_func( $this->_processClientHeaderCallback, $headerName, $value );
+			if ( $l !== false && is_array($l) && count($l) === 2)
+				return $l;
+			else
+				return false;
+		}
+		else
+			return array ( $headerName, $value );
+	}
 
     /**
      * Our handler for cURL option CURLOPT_HEADERFUNCTION
      *
      * @param resource $cu
-     * @param string $string
+     * @param string $header
      * @return int
      */
     protected function readHeaders(&$cu, $header)
     {
         $length = strlen($header);
 
-        if (preg_match(',^Cache-Control:,', $header)) {
+		if (preg_match(',^HTTP/[^\s]+\s+(\d+)\s+,', $header, $rg)) {
+            $this->_httpStatus = intval($rg[1]);
+			if ( $this->_httpStatus === 0 || !in_array($this->_httpStatus, $this->_status_codes) )
+				$this->_httpStatus = 500;
+            // skip this header
+			return $length;
+        }
+		elseif (preg_match(',^Cache-Control:,', $header)) {
             $this->_cacheControl = true;
         }
         elseif (preg_match(',^Pragma:,', $header)) {
@@ -225,10 +411,25 @@ class ProxyHandler
         }
         elseif (preg_match(',^Transfer-Encoding:,', $header)) {
             $this->_chunked = strpos($header, 'chunked') !== false;
+			// skip this header
+			return $length;
         }
+		elseif (preg_match(',^Content-Encoding:(.+)$,', trim($header), $rg)) {
+			$this->_encoding = trim($rg[1]);
+			// skip this header
+			return $length;
+		}
+
 
         if ($header !== self::RN) {
-            header(rtrim($header));
+            if ( $this->_filterResponseHeaderCallback !== null ) {
+				$header = call_user_func( $this->_filterResponseHeaderCallback, $header );
+				if ( $header !== "" ) {
+					header($header, false);
+				}
+			} else {
+				header(rtrim($header), false);
+			}
         }
 
         return $length;
@@ -257,12 +458,10 @@ class ProxyHandler
             $headersParsed = true;
         }
 
-        $length = strlen($body);
-        if ($this->_chunked) {
-            echo dechex($length) . self::RN . $body . self::RN;
-        } else {
-            echo $body;
-        }
+		$length = strlen($body);
+
+		$this->_body .= $body;
+
         return $length;
     }
 
@@ -273,9 +472,21 @@ class ProxyHandler
      */
     public function close()
     {
-        if ($this->_chunked) {
-            echo '0' . self::RN . self::RN;
-        }
+		header(isset( $_SERVER['SERVER_PROTOCOL'] ) ? $_SERVER['SERVER_PROTOCOL'] : 'HTTP/1.0', ' ' . $this->_httpStatus . ' ' . $this->_status_codes[$this->_httpStatus], true);
+
+		if ( $this->_encoding == 'gzip' ) {
+			$this->_body = gzdecode($this->_body);
+		}
+		if ($this->_chunked) {
+			if ( $this->_filterResponseBodyCallback !== null ) {
+				echo call_user_func( $this->_filterResponseBodyCallback, $this->_translatedUri, $this->_body );
+			} else {
+				echo $this->_body;
+			}
+		}else{
+			echo $this->_body;
+		}
+
         curl_close($this->_curlHandle);
     }
 
@@ -338,4 +549,9 @@ class ProxyHandler
     {
         curl_setopt($this->_curlHandle, $option, $value);
     }
+}
+
+
+if ( !function_exists('gzdecode') ) {
+	include 'func.gzdecode.php';
 }
